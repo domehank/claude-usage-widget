@@ -99,15 +99,15 @@ of `usage-statusline.ps1` marked `# 1. Save the usage numbers` into your own scr
 
 ## Build from source
 
-1. Install Rust from [rustup.rs](https://rustup.rs/) and accept the defaults.
+1. Install Rust from [rustup.rs](https://rustup.rs/). When the installer offers to install the
+   Visual Studio build tools, choose that option (1). Rust needs them to build Windows programs.
 2. Download this project (green **Code** button → **Download ZIP**, then unzip it), open a terminal in that folder and run:
 
    ```
    cargo build --release
    ```
 
-   The first build downloads the Rust toolchain named in `rust-toolchain.toml`, so it takes
-   a few minutes. You don't need Visual Studio.
+   The first build downloads the libraries it needs, so it takes a minute or two.
 3. The program is at `target\release\claude-usage-widget.exe`. If an older copy is running,
    exit it first (right-click → Exit).
 
