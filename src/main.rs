@@ -27,7 +27,7 @@ use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::Graphics::GdiPlus as gp;
 use windows_sys::Win32::Storage::FileSystem::*;
-use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW};
 use windows_sys::Win32::System::Registry::*;
 use windows_sys::Win32::System::Threading::*;
 use windows_sys::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
@@ -119,6 +119,24 @@ fn load_theme() -> Theme {
         Theme { light: true, fg: argb(25, 25, 25), dim: argb(95, 95, 95), track: argb(200, 200, 205) }
     } else {
         Theme { light: false, fg: argb(235, 235, 235), dim: argb(160, 160, 160), track: argb(70, 72, 80) }
+    }
+}
+
+/// Matches the right-click menu to the system theme. Windows has no public API for dark menus;
+/// this uses uxtheme.dll's SetPreferredAppMode (ordinal 135) and FlushMenuThemes (136), which
+/// are undocumented but stable since Windows 10 1903 and widely used. Missing: menus stay light.
+unsafe fn style_menus(light: bool) {
+    let ux = LoadLibraryW(wide("uxtheme.dll").as_ptr());
+    if ux.is_null() {
+        return;
+    }
+    if let Some(f) = GetProcAddress(ux, 135 as windows_sys::core::PCSTR) {
+        let set_mode: extern "system" fn(i32) -> i32 = std::mem::transmute(f);
+        set_mode(if light { 3 } else { 2 }); // ForceLight / ForceDark
+    }
+    if let Some(f) = GetProcAddress(ux, 136 as windows_sys::core::PCSTR) {
+        let flush: extern "system" fn() = std::mem::transmute(f);
+        flush();
     }
 }
 
@@ -355,6 +373,7 @@ unsafe fn create_widget() -> bool {
     SendMessageW(a.tooltip, TTM_ADDTOOLW, 0, &ti as *const _ as LPARAM);
     SendMessageW(a.tooltip, TTM_SETMAXTIPWIDTH, 0, 800);
     style_tooltip(a.tooltip, a.theme.light);
+    style_menus(a.theme.light);
 
     place(true);
     refresh(true);
@@ -650,6 +669,7 @@ extern "system" fn owner_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> L
                 let a = app();
                 a.theme = load_theme();
                 style_tooltip(a.tooltip, a.theme.light);
+    style_menus(a.theme.light);
                 place(true);
                 0
             }
