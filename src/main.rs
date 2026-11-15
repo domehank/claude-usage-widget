@@ -2,6 +2,8 @@
 //! 5-hour and weekly usage. Hover for exact numbers and reset times, drag left/right to move
 //! it (the position is remembered), right-click for "Reset position" / "Exit".
 //!
+//! Token counts in the tooltip come from Claude Code's session logs (see tokens.rs).
+//!
 //! Data: ~/.claude/usage.json, written by the Claude Code status line (statusline/usage-statusline.ps1) on
 //! every refresh. The widget watches that folder and redraws only when the numbers change.
 //!
@@ -18,6 +20,9 @@ use std::ptr::{null, null_mut};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
+use std::sync::Mutex;
+
+mod tokens;
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::Graphics::GdiPlus as gp;
@@ -31,6 +36,7 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 const WM_APP_FILE_CHANGED: u32 = WM_APP + 1;
+const WM_APP_TOKENS: u32 = WM_APP + 2; // a token count finished
 const TIMER_HOUSEKEEPING: usize = 1; // every 15 s: Explorer restart, taskbar size, reset times
 const TIMER_DEBOUNCE: usize = 2; // collapses bursts of folder change notifications
 const TIMER_RECREATE: usize = 3; // retries creating the widget while the taskbar is missing
@@ -42,14 +48,14 @@ struct Limit {
     short: &'static str,
     long: &'static str,
     with_day: bool,
+    secs: i64, // length of the window
 }
 const LIMITS: [Limit; 2] = [
-    Limit { key: "five_hour", short: "5h", long: "5-hour", with_day: false },
-    Limit { key: "seven_day", short: "Wk", long: "Weekly", with_day: true },
+    Limit { key: "five_hour", short: "5h", long: "5-hour", with_day: false, secs: 5 * 3600 },
+    Limit { key: "seven_day", short: "W", long: "Weekly", with_day: true, secs: 7 * 86_400 },
 ];
 
 struct Theme {
-    key: (u8, u8, u8), // transparent background color (layered window color key)
     fg: u32,
     dim: u32,
     track: u32,
@@ -72,6 +78,7 @@ struct App {
     drag: Option<(i32, i32)>, // (cursor x at start, offset at start)
     theme: Theme,
     quitting: bool,
+    tokens: [Option<u64>; 2], // per limit, counted from the session logs
 }
 
 static mut APP: Option<App> = None;
@@ -108,14 +115,10 @@ fn load_theme() -> Theme {
         );
     }
     if light == 1 {
-        Theme { key: (238, 238, 238), fg: argb(25, 25, 25), dim: argb(95, 95, 95), track: argb(200, 200, 205) }
+        Theme { fg: argb(25, 25, 25), dim: argb(95, 95, 95), track: argb(200, 200, 205) }
     } else {
-        Theme { key: (28, 28, 28), fg: argb(235, 235, 235), dim: argb(160, 160, 160), track: argb(70, 72, 80) }
+        Theme { fg: argb(235, 235, 235), dim: argb(160, 160, 160), track: argb(70, 72, 80) }
     }
-}
-
-fn colorref((r, g, b): (u8, u8, u8)) -> COLORREF {
-    r as u32 | (g as u32) << 8 | (b as u32) << 16
 }
 
 // ---- data ---------------------------------------------------------------------------------
@@ -177,20 +180,25 @@ fn fmt_time(unix: i64, with_day: bool) -> String {
     if with_day { format!("{} {}", DAYS[t.wDayOfWeek as usize % 7], hm) } else { hm }
 }
 
-fn tooltip_text(usage: &Value) -> String {
+fn tooltip_text(usage: &Value, toks: &[Option<u64>; 2]) -> String {
     let mut lines: Vec<String> = LIMITS
         .iter()
-        .map(|l| match limit_window(usage, l.key) {
+        .zip(toks)
+        .map(|(l, tok)| match limit_window(usage, l.key) {
             None => format!("{}: no data yet", l.long),
             Some(w) if w.expired => format!("{}: reset since last update", l.long),
             Some(w) => {
                 let reset = w.reset.map_or(String::new(), |r| format!(", resets {}", fmt_time(r, l.with_day)));
-                format!("{}: {}% used{}", l.long, w.pct as i32, reset)
+                let tok = tok.map_or(String::new(), |n| format!(", {} tokens", tokens::format(n)));
+                format!("{}: {}% used{}{}", l.long, w.pct as i32, tok, reset)
             }
         })
         .collect();
     if let Some(u) = usage.get("updated").and_then(Value::as_f64) {
         lines.push(format!("Updated {} (from Claude Code)", fmt_time(u as i64, true)));
+    }
+    if toks.iter().any(Option::is_some) {
+        lines.push("Tokens: this PC's Claude Code sessions, without cache reads".into());
     }
     lines.join("\r\n")
 }
@@ -200,13 +208,42 @@ unsafe fn refresh(force: bool) {
     let changed = load_usage();
     let a = app();
     let state = draw_state(&a.usage);
+    if changed {
+        count_tokens();
+    }
     if force || changed || state != a.state {
         a.state = state;
         update_tooltip();
         if !a.widget.is_null() {
-            InvalidateRect(a.widget, null(), 0);
+            paint(a.widget);
         }
     }
+}
+
+// ---- token counts -------------------------------------------------------------------------
+
+static COUNTER: Mutex<Option<tokens::Counter>> = Mutex::new(None);
+static COUNTED: Mutex<[Option<u64>; 2]> = Mutex::new([None, None]);
+
+/// Recounts the tokens of each current limit window on a worker thread (the first count reads a
+/// week of logs); the result comes back as WM_APP_TOKENS.
+fn count_tokens() {
+    let a = app();
+    let starts: Vec<Option<i64>> = LIMITS
+        .iter()
+        .map(|l| limit_window(&a.usage, l.key).filter(|w| !w.expired).and_then(|w| w.reset).map(|r| r - l.secs))
+        .collect();
+    let Some(since) = starts.iter().flatten().min().copied() else { return };
+    let projects = a.data_file.with_file_name("projects");
+    let owner = a.owner as isize;
+    std::thread::spawn(move || {
+        let mut guard = COUNTER.lock().unwrap();
+        let counter = guard.get_or_insert_with(tokens::Counter::default);
+        counter.update(&projects, since);
+        let totals = [0, 1].map(|i| starts[i].map(|s| counter.total(s)));
+        *COUNTED.lock().unwrap() = totals;
+        unsafe { PostMessageW(owner as HWND, WM_APP_TOKENS, 0, 0) };
+    });
 }
 
 // ---- position -----------------------------------------------------------------------------
@@ -262,7 +299,7 @@ unsafe fn place(force: bool) {
     a.bounds = b;
     // HWND_TOP among the taskbar's children, so it sits above the taskbar's own content
     SetWindowPos(a.widget, HWND_TOP, b.0, b.1, b.2, b.3, SWP_NOACTIVATE | SWP_SHOWWINDOW);
-    InvalidateRect(a.widget, null(), 0);
+    paint(a.widget);
 }
 
 // ---- widget lifetime ----------------------------------------------------------------------
@@ -288,7 +325,6 @@ unsafe fn create_widget() -> bool {
     if hwnd.is_null() {
         return false;
     }
-    SetLayeredWindowAttributes(hwnd, colorref(a.theme.key), 0, LWA_COLORKEY);
     a.widget = hwnd;
     a.bounds = (0, 0, 0, 0);
 
@@ -331,7 +367,7 @@ unsafe fn update_tooltip() {
     if a.tooltip.is_null() {
         return;
     }
-    let mut text = wide(&tooltip_text(&a.usage));
+    let mut text = wide(&tooltip_text(&a.usage, &a.tokens));
     let ti = tool_info(&mut text);
     SendMessageW(a.tooltip, TTM_UPDATETIPTEXTW, 0, &ti as *const _ as LPARAM);
 }
@@ -368,24 +404,36 @@ unsafe fn ensure_widget() {
 
 // ---- painting -----------------------------------------------------------------------------
 
+const PIXEL_FORMAT_32BPP_PARGB: i32 = 0x000E_200B; // GDI+ PixelFormat32bppPARGB
+
+/// Draws the widget into a 32-bit ARGB bitmap and hands it to the layered window.
+/// The background is alpha 1: invisible, but it still catches the mouse over the whole widget
+/// (fully transparent pixels would let clicks fall through to the taskbar).
 unsafe fn paint(hwnd: HWND) {
     let a = app();
-    let mut ps: PAINTSTRUCT = zeroed();
-    let hdc = BeginPaint(hwnd, &mut ps);
     let mut rc: RECT = zeroed();
     GetClientRect(hwnd, &mut rc);
     let (w, h) = (rc.right, rc.bottom);
-
-    // Double-buffered: draw into a memory bitmap filled with the transparent key color
-    let mem = CreateCompatibleDC(hdc);
-    let bmp = CreateCompatibleBitmap(hdc, w, h);
+    if w <= 0 || h <= 0 {
+        return;
+    }
+    let screen = GetDC(null_mut());
+    let mem = CreateCompatibleDC(screen);
+    let mut bmi: BITMAPINFO = zeroed();
+    bmi.bmiHeader.biSize = size_of::<BITMAPINFOHEADER>() as u32;
+    bmi.bmiHeader.biWidth = w;
+    bmi.bmiHeader.biHeight = -h; // top-down
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+    let mut bits = null_mut();
+    let bmp = CreateDIBSection(mem, &bmi, DIB_RGB_COLORS, &mut bits, null_mut(), 0);
     let old = SelectObject(mem, bmp as HGDIOBJ);
-    let bg = CreateSolidBrush(colorref(a.theme.key));
-    FillRect(mem, &rc, bg);
-    DeleteObject(bg as HGDIOBJ);
-
+    let mut canvas = null_mut();
+    gp::GdipCreateBitmapFromScan0(w, h, w * 4, PIXEL_FORMAT_32BPP_PARGB, bits as *const u8, &mut canvas);
     let mut g = null_mut();
-    gp::GdipCreateFromHDC(mem, &mut g);
+    gp::GdipGetImageGraphicsContext(canvas as *mut gp::GpImage, &mut g);
+    gp::GdipGraphicsClear(g, 0x0100_0000);
     gp::GdipSetSmoothingMode(g, gp::SmoothingModeAntiAlias);
     gp::GdipSetTextRenderingHint(g, gp::TextRenderingHintAntiAliasGridFit);
     let sc = a.scale;
@@ -444,12 +492,16 @@ unsafe fn paint(hwnd: HWND) {
     gp::GdipDeleteFont(small);
     gp::GdipDeleteFontFamily(family);
     gp::GdipDeleteGraphics(g);
+    gp::GdipDisposeImage(canvas as *mut gp::GpImage);
 
-    BitBlt(hdc, 0, 0, w, h, mem, 0, 0, SRCCOPY);
+    let size = SIZE { cx: w, cy: h };
+    let src = POINT { x: 0, y: 0 };
+    let blend = BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, BlendFlags: 0, SourceConstantAlpha: 255, AlphaFormat: AC_SRC_ALPHA as u8 };
+    UpdateLayeredWindow(hwnd, screen, null(), &size, mem, &src, 0, &blend, ULW_ALPHA);
     SelectObject(mem, old);
     DeleteObject(bmp as HGDIOBJ);
     DeleteDC(mem);
-    EndPaint(hwnd, &ps);
+    ReleaseDC(null_mut(), screen);
 }
 
 // ---- window procedures --------------------------------------------------------------------
@@ -490,7 +542,8 @@ extern "system" fn widget_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
     unsafe {
         match msg {
             WM_PAINT => {
-                paint(hwnd);
+                // Layered windows are redrawn with paint() directly; just validate here
+                ValidateRect(hwnd, null());
                 0
             }
             WM_ERASEBKGND => 1,
@@ -549,6 +602,11 @@ extern "system" fn owner_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> L
             return 0;
         }
         match msg {
+            WM_APP_TOKENS => {
+                app().tokens = *COUNTED.lock().unwrap();
+                update_tooltip();
+                0
+            }
             WM_APP_FILE_CHANGED => {
                 SetTimer(hwnd, TIMER_DEBOUNCE, 200, None);
                 0
@@ -580,9 +638,6 @@ extern "system" fn owner_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> L
                 // Theme switch (light/dark) or display change
                 let a = app();
                 a.theme = load_theme();
-                if !a.widget.is_null() {
-                    SetLayeredWindowAttributes(a.widget, colorref(a.theme.key), 0, LWA_COLORKEY);
-                }
                 place(true);
                 0
             }
@@ -674,8 +729,10 @@ fn main() {
             drag: None,
             theme: load_theme(),
             quitting: false,
+            tokens: [None, None],
         });
         load_usage();
+        count_tokens();
         app().state = draw_state(&app().usage);
 
         if !create_widget() {

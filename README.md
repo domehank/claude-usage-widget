@@ -4,16 +4,17 @@ Two small bars in the Windows taskbar that show how much of your Claude usage li
 
 ```
 5h ──────────  0%
-Wk ━━━━━━━──── 70%
+W  ━━━━━━━──── 70%
 ```
 
 - **5h**: the 5-hour session limit
-- **Wk**: the weekly limit
+- **W**: the weekly limit
 
 The bars turn orange at 75% and red at 90%.
 
-- **Hover** over the widget to see the exact numbers and when each limit resets.
-- **Drag** it left or right to move it along the taskbar. It remembers where you put it.
+- **Hover** over the widget to see the exact numbers, how many tokens you have used in each
+  window (for example `15.7k`), and when each limit resets.
+- **Drag** it left or right (grab it anywhere in its area) to move it along the taskbar. It remembers where you put it.
 - **Right-click** it for *Reset position* and *Exit*.
 
 ## What you need
@@ -32,6 +33,14 @@ the chat box. Claude Code runs a script after each reply and passes it your usag
 The script in [`statusline/usage-statusline.ps1`](statusline/usage-statusline.ps1) saves
 the numbers for the widget. So the widget updates while you use Claude Code. When you aren't
 using it, the widget shows the last known numbers and switches to 0% once a limit has reset.
+
+The token counts in the hover text come from Claude Code's own session logs in
+`%USERPROFILE%\.claude\projects\`. Each reply records the tokens it used, and the widget adds
+them up for the current 5-hour and weekly windows. Two things to know:
+
+- They only include Claude Code on **this PC**, not claude.ai or Claude Code on other computers.
+- They count input, output and cache-write tokens, but not **cache reads**. Every reply
+  re-reads the whole conversation from cache, so including them would make the numbers huge.
 
 ## Install
 
