@@ -56,6 +56,7 @@ const LIMITS: [Limit; 2] = [
 ];
 
 struct Theme {
+    light: bool, // Windows taskbar/system theme is light
     fg: u32,
     dim: u32,
     track: u32,
@@ -115,9 +116,18 @@ fn load_theme() -> Theme {
         );
     }
     if light == 1 {
-        Theme { fg: argb(25, 25, 25), dim: argb(95, 95, 95), track: argb(200, 200, 205) }
+        Theme { light: true, fg: argb(25, 25, 25), dim: argb(95, 95, 95), track: argb(200, 200, 205) }
     } else {
-        Theme { fg: argb(235, 235, 235), dim: argb(160, 160, 160), track: argb(70, 72, 80) }
+        Theme { light: false, fg: argb(235, 235, 235), dim: argb(160, 160, 160), track: argb(70, 72, 80) }
+    }
+}
+
+/// Matches the hover tooltip to the system theme: Windows' built-in dark tooltip style in dark
+/// mode, the normal one in light mode.
+unsafe fn style_tooltip(tooltip: HWND, light: bool) {
+    if !tooltip.is_null() {
+        let style = wide(if light { "Explorer" } else { "DarkMode_Explorer" });
+        SetWindowTheme(tooltip, style.as_ptr(), null());
     }
 }
 
@@ -344,6 +354,7 @@ unsafe fn create_widget() -> bool {
     let ti = tool_info(&mut text);
     SendMessageW(a.tooltip, TTM_ADDTOOLW, 0, &ti as *const _ as LPARAM);
     SendMessageW(a.tooltip, TTM_SETMAXTIPWIDTH, 0, 800);
+    style_tooltip(a.tooltip, a.theme.light);
 
     place(true);
     refresh(true);
@@ -638,6 +649,7 @@ extern "system" fn owner_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> L
                 // Theme switch (light/dark) or display change
                 let a = app();
                 a.theme = load_theme();
+                style_tooltip(a.tooltip, a.theme.light);
                 place(true);
                 0
             }
