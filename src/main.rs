@@ -560,8 +560,10 @@ unsafe fn show_menu() {
     let mut p: POINT = zeroed();
     GetCursorPos(&mut p);
     SetForegroundWindow(a.owner); // so the menu closes when clicking elsewhere
+    SendMessageW(a.tooltip, TTM_ACTIVATE, 0, 0); // no tooltip over the open menu
     let cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_BOTTOMALIGN, p.x, p.y, 0, a.owner, null());
     PostMessageW(a.owner, WM_NULL, 0, 0);
+    SendMessageW(a.tooltip, TTM_ACTIVATE, 1, 0);
     DestroyMenu(menu);
     match cmd {
         CMD_RESET_POSITION => {
