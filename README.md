@@ -13,7 +13,8 @@ W  ━━━━━━━──── 70%
 The bars turn orange at 75% and red at 90%.
 
 - **Hover** over the widget to see the exact numbers, how many tokens you have used in each
-  window (for example `15.7k`), and when each limit resets.
+  window (for example `15.7k`, with an estimated maximum once a window passes 10%), and when
+  each limit resets.
 - **Drag** it left or right (grab it anywhere in its area) to move it along the taskbar. It remembers where you put it.
 - **Right-click** it for *Reset position* and *Exit*.
 
@@ -41,6 +42,15 @@ them up for the current 5-hour and weekly windows. Two things to know:
 - They only include Claude Code on **this PC**, not claude.ai or Claude Code on other computers.
 - They count input, output and cache-write tokens, but not **cache reads**. Every reply
   re-reads the whole conversation from cache, so including them would make the numbers huge.
+
+Once a window is at least 10% used, the hover text also shows an **estimated maximum**, for
+example `188k / ~1.9M tokens`. Claude doesn't publish token limits, so the widget works it out
+as *tokens used ÷ percentage used*. Treat it as a rough guide:
+
+- Limits are weighted by model, so the estimate is lower when you use Opus a lot and higher with Sonnet.
+- If you also use claude.ai or Claude Code on another computer, the percentage goes up but this
+  PC's token count doesn't, so the estimate comes out too low.
+- Below 10% the whole-number percentage is too rough to estimate from, so no maximum is shown.
 
 ## Install
 

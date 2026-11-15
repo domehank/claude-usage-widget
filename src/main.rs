@@ -217,7 +217,16 @@ fn tooltip_text(usage: &Value, toks: &[Option<u64>; 2]) -> String {
             Some(w) if w.expired => format!("{}: reset since last update", l.long),
             Some(w) => {
                 let reset = w.reset.map_or(String::new(), |r| format!(", resets {}", fmt_time(r, l.with_day)));
-                let tok = tok.map_or(String::new(), |n| format!(", {} tokens", tokens::format(n)));
+                let tok = tok.map_or(String::new(), |n| {
+                    // Estimated max: tokens so far ÷ share of the limit used. Too noisy below 10%,
+                    // where the whole-number percentage is off by up to a few tens of percent.
+                    let max = if w.pct >= 10.0 {
+                        format!(" / ~{}", tokens::format((n as f64 * 100.0 / w.pct) as u64))
+                    } else {
+                        String::new()
+                    };
+                    format!(", {}{} tokens", tokens::format(n), max)
+                });
                 format!("{}: {}% used{}{}", l.long, w.pct as i32, tok, reset)
             }
         })
@@ -227,6 +236,7 @@ fn tooltip_text(usage: &Value, toks: &[Option<u64>; 2]) -> String {
     }
     if toks.iter().any(Option::is_some) {
         lines.push("Tokens: this PC's Claude Code sessions, without cache reads".into());
+        lines.push("~Max: estimated as tokens ÷ % used, shown from 10%".into());
     }
     lines.join("\r\n")
 }
